@@ -834,8 +834,9 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 	// Add the handlers
 	ah := &ackHandler{ackFn, nackFn, nil}
 	m.ackLock.Lock()
+	defer m.ackLock.Unlock()
+
 	m.ackHandlers[seqNo] = ah
-	m.ackLock.Unlock()
 
 	// Setup a reaping routing
 	ah.timer = time.AfterFunc(timeout, func() {
@@ -854,11 +855,12 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 // deleted. This is used for indirect pings so does not configure a function
 // for nacks.
 func (m *Memberlist) setAckHandler(seqNo uint32, ackFn func([]byte, time.Time), timeout time.Duration) {
+	m.ackLock.Lock()
+	defer m.ackLock.Unlock()
+
 	// Add the handler
 	ah := &ackHandler{ackFn, nil, nil}
-	m.ackLock.Lock()
 	m.ackHandlers[seqNo] = ah
-	m.ackLock.Unlock()
 
 	// Setup a reaping routing
 	ah.timer = time.AfterFunc(timeout, func() {
@@ -871,9 +873,10 @@ func (m *Memberlist) setAckHandler(seqNo uint32, ackFn func([]byte, time.Time), 
 // Invokes an ack handler if any is associated, and reaps the handler immediately
 func (m *Memberlist) invokeAckHandler(ack ackResp, timestamp time.Time) {
 	m.ackLock.Lock()
+	defer m.ackLock.Unlock()
+
 	ah, ok := m.ackHandlers[ack.SeqNo]
 	delete(m.ackHandlers, ack.SeqNo)
-	m.ackLock.Unlock()
 	if !ok {
 		return
 	}
@@ -884,8 +887,9 @@ func (m *Memberlist) invokeAckHandler(ack ackResp, timestamp time.Time) {
 // Invokes nack handler if any is associated.
 func (m *Memberlist) invokeNackHandler(nack nackResp) {
 	m.ackLock.Lock()
+	defer m.ackLock.Unlock()
+
 	ah, ok := m.ackHandlers[nack.SeqNo]
-	m.ackLock.Unlock()
 	if !ok || ah.nackFn == nil {
 		return
 	}
@@ -1132,7 +1136,6 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		if oldState == StateDead || oldState == StateLeft {
 			// if Dead/Left -> Alive, notify of join
 			m.config.Events.NotifyJoin(&state.Node)
-
 		} else if !bytes.Equal(oldMeta, state.Meta) {
 			// if Meta changed, trigger an update notification
 			m.config.Events.NotifyUpdate(&state.Node)
