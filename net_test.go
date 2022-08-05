@@ -760,9 +760,9 @@ func TestRawSendUdp_CRC(t *testing.T) {
 	}
 
 	// Register a node with PMax >= 5 to be looked up, should result in a checksum
-	m.nodeMap["127.0.0.1"] = &nodeState{
+	m.setNodeMap("127.0.0.1", &nodeState{
 		Node: Node{PMax: 5},
-	}
+	})
 	m.rawSendMsgPacket(a, nil, payload)
 
 	in = make([]byte, 1500)

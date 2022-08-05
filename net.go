@@ -349,8 +349,18 @@ func (m *Memberlist) packetListen() {
 	for {
 		select {
 		case packet := <-m.transport.PacketCh():
-			m.ingestPacket(packet.Buf, packet.From, packet.Timestamp)
+			donech := make(chan bool)
+			go func() {
+				m.ingestPacket(packet.Buf, packet.From, packet.Timestamp)
 
+				donech <- true
+			}()
+
+			select {
+			case <-time.After(time.Second * 3):
+				m.logger.Printf("[WARN] memberlist: stucked in packet listen")
+			case <-donech:
+			}
 		case <-m.shutdownCh:
 			return
 		}
@@ -835,10 +845,8 @@ func (m *Memberlist) rawSendMsgPacket(a Address, node *Node, msg []byte) error {
 			m.logger.Printf("[ERR] memberlist: Failed to parse address %q: %v", a.Addr, err)
 			return err
 		}
-		m.nodeLock.RLock()
-		nodeState, ok := m.nodeMap[toAddr]
-		m.nodeLock.RUnlock()
-		if ok {
+		nodeState := m.getNodeMap(toAddr)
+		if nodeState != nil {
 			node = &nodeState.Node
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -257,9 +258,7 @@ START:
 
 // probeNodeByAddr just safely calls probeNode given only the address of the node (for tests)
 func (m *Memberlist) probeNodeByAddr(addr string) {
-	m.nodeLock.RLock()
-	n := m.nodeMap[addr]
-	m.nodeLock.RUnlock()
+	n := m.getNodeMap(addr)
 
 	m.probeNode(n)
 }
@@ -556,7 +555,7 @@ func (m *Memberlist) resetNodes() {
 
 	// Deregister the dead nodes
 	for i := deadIdx; i < len(m.nodes); i++ {
-		delete(m.nodeMap, m.nodes[i].Name)
+		m.removeNodeMap(m.nodes[i].Name)
 		m.nodes[i] = nil
 	}
 
@@ -833,21 +832,52 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 
 	// Add the handlers
 	ah := &ackHandler{ackFn, nackFn, nil}
-	m.ackLock.Lock()
-	defer m.ackLock.Unlock()
-
-	m.ackHandlers[seqNo] = ah
 
 	// Setup a reaping routing
 	ah.timer = time.AfterFunc(timeout, func() {
-		m.ackLock.Lock()
-		delete(m.ackHandlers, seqNo)
-		m.ackLock.Unlock()
+		m.removeMapAckHandler(seqNo)
+
 		select {
 		case ackCh <- ackMessage{false, nil, time.Now()}:
 		default:
 		}
 	})
+
+	m.setMapAckHandler(seqNo, ah)
+}
+
+func (m *Memberlist) getMapAckHandler(seqNo uint32) *ackHandler {
+	i, found := m.ackHandlers.Get(strconv.FormatUint(uint64(seqNo), 10))
+	if !found {
+		return nil
+	}
+
+	return i.(*ackHandler)
+}
+
+func (m *Memberlist) setMapAckHandler(seqNo uint32, ah *ackHandler) {
+	_ = m.ackHandlers.Set(strconv.FormatUint(uint64(seqNo), 10), ah)
+}
+
+func (m *Memberlist) removeMapAckHandler(seqNo uint32) {
+	m.ackHandlers.Remove(strconv.FormatUint(uint64(seqNo), 10))
+}
+
+func (m *Memberlist) getNodeTimer(node string) *suspicion {
+	i, found := m.nodeTimers.Get(node)
+	if !found {
+		return nil
+	}
+
+	return i.(*suspicion)
+}
+
+func (m *Memberlist) setNodeTimer(node string, sus *suspicion) {
+	_ = m.nodeTimers.Set(node, sus)
+}
+
+func (m *Memberlist) removeNodeTimer(node string) {
+	m.nodeTimers.Remove(node)
 }
 
 // setAckHandler is used to attach a handler to be invoked when an ack with a
@@ -855,44 +885,38 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 // deleted. This is used for indirect pings so does not configure a function
 // for nacks.
 func (m *Memberlist) setAckHandler(seqNo uint32, ackFn func([]byte, time.Time), timeout time.Duration) {
-	m.ackLock.Lock()
-	defer m.ackLock.Unlock()
-
 	// Add the handler
 	ah := &ackHandler{ackFn, nil, nil}
-	m.ackHandlers[seqNo] = ah
 
 	// Setup a reaping routing
 	ah.timer = time.AfterFunc(timeout, func() {
-		m.ackLock.Lock()
-		delete(m.ackHandlers, seqNo)
-		m.ackLock.Unlock()
+		m.removeMapAckHandler(seqNo)
 	})
+
+	m.setMapAckHandler(seqNo, ah)
 }
 
 // Invokes an ack handler if any is associated, and reaps the handler immediately
 func (m *Memberlist) invokeAckHandler(ack ackResp, timestamp time.Time) {
-	m.ackLock.Lock()
-	defer m.ackLock.Unlock()
+	ah := m.getMapAckHandler(ack.SeqNo)
 
-	ah, ok := m.ackHandlers[ack.SeqNo]
-	delete(m.ackHandlers, ack.SeqNo)
-	if !ok {
+	if ah == nil {
 		return
 	}
+
+	m.removeMapAckHandler(ack.SeqNo)
+
 	ah.timer.Stop()
 	ah.ackFn(ack.Payload, timestamp)
 }
 
 // Invokes nack handler if any is associated.
 func (m *Memberlist) invokeNackHandler(nack nackResp) {
-	m.ackLock.Lock()
-	defer m.ackLock.Unlock()
-
-	ah, ok := m.ackHandlers[nack.SeqNo]
-	if !ok || ah.nackFn == nil {
+	ah := m.getMapAckHandler(nack.SeqNo)
+	if ah == nil || ah.nackFn == nil {
 		return
 	}
+
 	ah.nackFn()
 }
 
@@ -932,7 +956,7 @@ func (m *Memberlist) refute(me *nodeState, accusedInc uint32) {
 func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
-	state, ok := m.nodeMap[a.Node]
+	state := m.getNodeMap(a.Node)
 
 	// It is possible that during a Leave(), there is already an aliveMsg
 	// in-queue to be processed but blocked by the locks above. If we let
@@ -984,7 +1008,7 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 	// Check if we've never seen this node before, and if not, then
 	// store this node in our node map.
 	var updatesNode bool
-	if !ok {
+	if state == nil {
 		errCon := m.config.IPAllowed(a.Addr)
 		if errCon != nil {
 			m.logger.Printf("[WARN] memberlist: Rejected node %s (%v): %s", a.Node, net.IP(a.Addr), errCon)
@@ -1009,7 +1033,7 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		}
 
 		// Add to map
-		m.nodeMap[a.Node] = state
+		m.setNodeMap(a.Node, state)
 
 		// Get a random offset. This is important to ensure
 		// the failure detection bound is low on average. If all
@@ -1072,7 +1096,7 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 	}
 
 	// Clear out any suspicion timer that may be in effect.
-	delete(m.nodeTimers, a.Node)
+	m.removeNodeTimer(a.Node)
 
 	// Store the old state and meta data
 	oldState := state.State
@@ -1148,10 +1172,10 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 func (m *Memberlist) suspectNode(s *suspect) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
-	state, ok := m.nodeMap[s.Node]
+	state := m.getNodeMap(s.Node)
 
 	// If we've never heard about this node before, ignore it
-	if !ok {
+	if state == nil {
 		return
 	}
 
@@ -1164,7 +1188,7 @@ func (m *Memberlist) suspectNode(s *suspect) {
 	// to us we will go ahead and re-gossip it. This allows for multiple
 	// independent confirmations to flow even when a node probes a node
 	// that's already suspect.
-	if timer, ok := m.nodeTimers[s.Node]; ok {
+	if timer := m.getNodeTimer(s.Node); timer != nil {
 		if timer.Confirm(s.From) {
 			m.encodeAndBroadcast(s.Node, suspectMsg, s)
 		}
@@ -1215,8 +1239,8 @@ func (m *Memberlist) suspectNode(s *suspect) {
 		var d *dead
 
 		m.nodeLock.Lock()
-		state, ok := m.nodeMap[s.Node]
-		timeout := ok && state.State == StateSuspect && state.StateChange == changeTime
+		state := m.getNodeMap(s.Node)
+		timeout := state != nil && state.State == StateSuspect && state.StateChange == changeTime
 		if timeout {
 			d = &dead{Incarnation: state.Incarnation, Node: state.Name, From: m.config.Name}
 		}
@@ -1233,7 +1257,7 @@ func (m *Memberlist) suspectNode(s *suspect) {
 			m.deadNode(d)
 		}
 	}
-	m.nodeTimers[s.Node] = newSuspicion(s.From, k, min, max, fn)
+	m.setNodeTimer(s.Node, newSuspicion(s.From, k, min, max, fn))
 }
 
 // deadNode is invoked by the network layer when we get a message
@@ -1241,10 +1265,10 @@ func (m *Memberlist) suspectNode(s *suspect) {
 func (m *Memberlist) deadNode(d *dead) {
 	m.nodeLock.Lock()
 	defer m.nodeLock.Unlock()
-	state, ok := m.nodeMap[d.Node]
+	state := m.getNodeMap(d.Node)
 
 	// If we've never heard about this node before, ignore it
-	if !ok {
+	if state == nil {
 		return
 	}
 
@@ -1254,7 +1278,7 @@ func (m *Memberlist) deadNode(d *dead) {
 	}
 
 	// Clear out any suspicion timer that may be in effect.
-	delete(m.nodeTimers, d.Node)
+	m.removeNodeTimer(d.Node)
 
 	// Ignore if node is already dead
 	if state.DeadOrLeft() {

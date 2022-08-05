@@ -74,7 +74,7 @@ func TestMemberList_Probe(t *testing.T) {
 	m1.probe()
 
 	// Should not be marked suspect
-	n := m1.nodeMap[addr2.String()]
+	n := m1.getNodeMap(addr2.String())
 	if n.State != StateAlive {
 		t.Fatalf("Expect node to be alive")
 	}
@@ -120,7 +120,7 @@ func TestMemberList_ProbeNode_Suspect(t *testing.T) {
 	a4 := alive{Node: addr4.String(), Addr: ip4, Port: uint16(bindPort), Incarnation: 1, Vsn: m1.config.BuildVsnArray()}
 	m1.aliveNode(&a4, nil, false)
 
-	n := m1.nodeMap[addr4.String()]
+	n := m1.getNodeMap(addr4.String())
 	m1.probeNode(n)
 
 	// Should be marked suspect.
@@ -604,7 +604,7 @@ func TestMemberList_ProbeNode_Awareness_Degraded(t *testing.T) {
 	}
 
 	// Have node m1 probe m4.
-	n := m1.nodeMap[addr4.String()]
+	n := m1.getNodeMap(addr4.String())
 	startProbe := time.Now()
 	m1.probeNode(n)
 	probeTime := time.Now().Sub(startProbe)
@@ -686,8 +686,8 @@ func TestMemberList_ProbeNode_Wrong_VSN(t *testing.T) {
 	}
 
 	// Have node m1 probe m4.
-	n, ok := m1.nodeMap[addr4.String()]
-	if ok || n != nil {
+	n := m1.getNodeMap(addr4.String())
+	if n != nil {
 		t.Fatalf("expect node a4 to be not taken into account, because of its wrong version")
 	}
 }
@@ -723,7 +723,7 @@ func TestMemberList_ProbeNode_Awareness_Improved(t *testing.T) {
 	}
 
 	// Have node m1 probe m2.
-	n := m1.nodeMap[addr2.String()]
+	n := m1.getNodeMap(addr2.String())
 	m1.probeNode(n)
 
 	// Node should be reported alive.
@@ -782,7 +782,7 @@ func TestMemberList_ProbeNode_Awareness_MissedNack(t *testing.T) {
 	}
 
 	// Have node m1 probe m4.
-	n := m1.nodeMap[addr4.String()]
+	n := m1.getNodeMap(addr4.String())
 	startProbe := time.Now()
 	m1.probeNode(n)
 	probeTime := time.Now().Sub(startProbe)
@@ -859,7 +859,7 @@ func TestMemberList_ProbeNode_Awareness_OldProtocol(t *testing.T) {
 	}
 
 	// Have node m1 probe m4.
-	n := m1.nodeMap[addr4.String()]
+	n := m1.getNodeMap(addr4.String())
 	startProbe := time.Now()
 	m1.probeNode(n)
 	probeTime := time.Now().Sub(startProbe)
@@ -915,7 +915,7 @@ func TestMemberList_ProbeNode_Buddy(t *testing.T) {
 
 	// Force the state to suspect so we piggyback a suspect message with the ping.
 	// We should see this get refuted later, and the ping will succeed.
-	n := m1.nodeMap[addr2.String()]
+	n := m1.getNodeMap(addr2.String())
 	n.State = StateSuspect
 	m1.probeNode(n)
 
@@ -959,7 +959,7 @@ func TestMemberList_ProbeNode(t *testing.T) {
 	a2 := alive{Node: addr2.String(), Addr: ip2, Port: uint16(bindPort), Incarnation: 1}
 	m1.aliveNode(&a2, nil, false)
 
-	n := m1.nodeMap[addr2.String()]
+	n := m1.getNodeMap(addr2.String())
 	m1.probeNode(n)
 
 	// Should be marked alive
@@ -998,7 +998,7 @@ func TestMemberList_Ping(t *testing.T) {
 	m1.aliveNode(&a2, nil, false)
 
 	// Do a legit ping.
-	n := m1.nodeMap[addr2.String()]
+	n := m1.getNodeMap(addr2.String())
 	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(addr2.String(), strconv.Itoa(bindPort)))
 	if err != nil {
 		t.Fatalf("err: %v", err)
@@ -1037,7 +1037,7 @@ func TestMemberList_ResetNodes(t *testing.T) {
 	if len(m.nodes) != 3 {
 		t.Fatalf("Bad length")
 	}
-	if _, ok := m.nodeMap["test2"]; !ok {
+	if s := m.getNodeMap("test2"); s == nil {
 		t.Fatalf("test2 should not be unmapped")
 	}
 
@@ -1046,7 +1046,7 @@ func TestMemberList_ResetNodes(t *testing.T) {
 	if len(m.nodes) != 2 {
 		t.Fatalf("Bad length")
 	}
-	if _, ok := m.nodeMap["test2"]; ok {
+	if s := m.getNodeMap("test2"); s != nil {
 		t.Fatalf("test2 should be unmapped")
 	}
 }
@@ -1064,15 +1064,13 @@ func TestMemberList_NextSeq(t *testing.T) {
 func ackHandlerExists(t *testing.T, m *Memberlist, idx uint32) bool {
 	t.Helper()
 
-	m.ackLock.Lock()
-	_, ok := m.ackHandlers[idx]
-	m.ackLock.Unlock()
+	ah := m.getMapAckHandler(idx)
 
-	return ok
+	return ah != nil
 }
 
 func TestMemberList_setProbeChannels(t *testing.T) {
-	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+	m := &Memberlist{ackHandlers: newShardedMap(1 << 3)}
 
 	ch := make(chan ackMessage, 1)
 	m.setProbeChannels(0, ch, nil, 10*time.Millisecond)
@@ -1085,7 +1083,7 @@ func TestMemberList_setProbeChannels(t *testing.T) {
 }
 
 func TestMemberList_setAckHandler(t *testing.T) {
-	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+	m := &Memberlist{ackHandlers: newShardedMap(1 << 3)}
 
 	f := func([]byte, time.Time) {}
 	m.setAckHandler(0, f, 10*time.Millisecond)
@@ -1098,7 +1096,7 @@ func TestMemberList_setAckHandler(t *testing.T) {
 }
 
 func TestMemberList_invokeAckHandler(t *testing.T) {
-	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+	m := &Memberlist{ackHandlers: newShardedMap(1 << 3)}
 
 	// Does nothing
 	m.invokeAckHandler(ackResp{}, time.Now())
@@ -1117,7 +1115,7 @@ func TestMemberList_invokeAckHandler(t *testing.T) {
 }
 
 func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
-	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+	m := &Memberlist{ackHandlers: newShardedMap(1 << 3)}
 
 	ack := ackResp{0, []byte{0, 0, 0}}
 
@@ -1151,7 +1149,7 @@ func TestMemberList_invokeAckHandler_Channel_Ack(t *testing.T) {
 }
 
 func TestMemberList_invokeAckHandler_Channel_Nack(t *testing.T) {
-	m := &Memberlist{ackHandlers: make(map[uint32]*ackHandler)}
+	m := &Memberlist{ackHandlers: newShardedMap(1 << 3)}
 
 	nack := nackResp{0}
 
@@ -1216,8 +1214,8 @@ func TestMemberList_AliveNode_NewNode(t *testing.T) {
 		t.Fatalf("should add node")
 	}
 
-	state, ok := m.nodeMap["test"]
-	if !ok {
+	state := m.getNodeMap("test")
+	if state == nil {
 		t.Fatalf("should map node")
 	}
 
@@ -1264,7 +1262,7 @@ func TestMemberList_AliveNode_SuspectNode(t *testing.T) {
 	ted.Toggle(true)
 
 	// Make suspect
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 	state.State = StateSuspect
 	state.StateChange = state.StateChange.Add(-time.Hour)
 
@@ -1315,7 +1313,7 @@ func TestMemberList_AliveNode_Idempotent(t *testing.T) {
 	ted.Toggle(true)
 
 	// Make suspect
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 	stateTime := state.StateChange
 
 	// Should reset to alive now
@@ -1402,14 +1400,15 @@ func TestMemberList_AliveNode_ChangeMeta(t *testing.T) {
 		Addr:        []byte{127, 0, 0, 1},
 		Meta:        []byte("val1"),
 		Incarnation: 1,
-		Vsn:         m.config.BuildVsnArray()}
+		Vsn:         m.config.BuildVsnArray(),
+	}
 	m.aliveNode(&a, nil, false)
 
 	// Listen only after first join
 	ted.Toggle(true)
 
 	// Make suspect
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 
 	// Should reset to alive now
 	a.Incarnation = 2
@@ -1436,7 +1435,6 @@ func TestMemberList_AliveNode_ChangeMeta(t *testing.T) {
 	default:
 		t.Fatalf("missing event!")
 	}
-
 }
 
 func TestMemberList_AliveNode_Refute(t *testing.T) {
@@ -1459,7 +1457,7 @@ func TestMemberList_AliveNode_Refute(t *testing.T) {
 	}
 	m.aliveNode(&s, nil, false)
 
-	state := m.nodeMap[m.config.Name]
+	state := m.getNodeMap(m.config.Name)
 	if state.State != StateAlive {
 		t.Fatalf("should still be alive")
 	}
@@ -1503,7 +1501,7 @@ func TestMemberList_AliveNode_Conflict(t *testing.T) {
 	}
 	m.aliveNode(&s, nil, false)
 
-	state := m.nodeMap[nodeName]
+	state := m.getNodeMap(nodeName)
 	if state.State != StateAlive {
 		t.Fatalf("should still be alive")
 	}
@@ -1527,7 +1525,7 @@ func TestMemberList_AliveNode_Conflict(t *testing.T) {
 	m.deadNode(&d)
 	m.broadcasts.Reset()
 
-	state = m.nodeMap[nodeName]
+	state = m.getNodeMap(nodeName)
 	if state.State != StateDead {
 		t.Fatalf("should be dead")
 	}
@@ -1545,7 +1543,7 @@ func TestMemberList_AliveNode_Conflict(t *testing.T) {
 	}
 	m.aliveNode(&s2, nil, false)
 
-	state = m.nodeMap[nodeName]
+	state = m.getNodeMap(nodeName)
 	if state.State != StateAlive {
 		t.Fatalf("should still be alive")
 	}
@@ -1640,7 +1638,7 @@ func TestMemberList_SuspectNode_DoubleSuspect(t *testing.T) {
 	a := alive{Node: "test", Addr: []byte{127, 0, 0, 1}, Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 	m.aliveNode(&a, nil, false)
 
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 	state.StateChange = state.StateChange.Add(-time.Hour)
 
 	s := suspect{Node: "test", Incarnation: 1}
@@ -1669,7 +1667,6 @@ func TestMemberList_SuspectNode_DoubleSuspect(t *testing.T) {
 	if m.broadcasts.NumQueued() != 0 {
 		t.Fatalf("expected only one queued message")
 	}
-
 }
 
 func TestMemberList_SuspectNode_OldSuspect(t *testing.T) {
@@ -1679,7 +1676,7 @@ func TestMemberList_SuspectNode_OldSuspect(t *testing.T) {
 	a := alive{Node: "test", Addr: []byte{127, 0, 0, 1}, Incarnation: 10, Vsn: m.config.BuildVsnArray()}
 	m.aliveNode(&a, nil, false)
 
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 	state.StateChange = state.StateChange.Add(-time.Hour)
 
 	// Clear queue
@@ -1716,7 +1713,7 @@ func TestMemberList_SuspectNode_Refute(t *testing.T) {
 	s := suspect{Node: m.config.Name, Incarnation: 1}
 	m.suspectNode(&s)
 
-	state := m.nodeMap[m.config.Name]
+	state := m.getNodeMap(m.config.Name)
 	if state.State != StateAlive {
 		t.Fatalf("should still be alive")
 	}
@@ -1775,7 +1772,7 @@ func TestMemberList_DeadNodeLeft(t *testing.T) {
 	// Read the dead event
 	<-ch
 
-	state := m.nodeMap[nodeName]
+	state := m.getNodeMap(nodeName)
 	if state.State != StateLeft {
 		t.Fatalf("Bad state")
 	}
@@ -1807,7 +1804,7 @@ func TestMemberList_DeadNodeLeft(t *testing.T) {
 	// Read the join event
 	<-ch
 
-	state = m.nodeMap[nodeName]
+	state = m.getNodeMap(nodeName)
 	if state.State != StateAlive {
 		t.Fatalf("should still be alive")
 	}
@@ -1836,7 +1833,7 @@ func TestMemberList_DeadNode(t *testing.T) {
 	// Read the join event
 	<-ch
 
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 	state.StateChange = state.StateChange.Add(-time.Hour)
 
 	d := dead{Node: "test", Incarnation: 1}
@@ -1879,7 +1876,7 @@ func TestMemberList_DeadNode_Double(t *testing.T) {
 	a := alive{Node: "test", Addr: []byte{127, 0, 0, 1}, Incarnation: 1, Vsn: m.config.BuildVsnArray()}
 	m.aliveNode(&a, nil, false)
 
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 	state.StateChange = state.StateChange.Add(-time.Hour)
 
 	d := dead{Node: "test", Incarnation: 1}
@@ -1914,7 +1911,7 @@ func TestMemberList_DeadNode_OldDead(t *testing.T) {
 	a := alive{Node: "test", Addr: []byte{127, 0, 0, 1}, Incarnation: 10, Vsn: m.config.BuildVsnArray()}
 	m.aliveNode(&a, nil, false)
 
-	state := m.nodeMap["test"]
+	state := m.getNodeMap("test")
 	state.StateChange = state.StateChange.Add(-time.Hour)
 
 	d := dead{Node: "test", Incarnation: 1}
@@ -1939,8 +1936,8 @@ func TestMemberList_DeadNode_AliveReplay(t *testing.T) {
 	m.aliveNode(&a, nil, false)
 
 	// Should remain dead
-	state, ok := m.nodeMap["test"]
-	if ok && state.State != StateDead {
+	state := m.getNodeMap("test")
+	if state != nil && state.State != StateDead {
 		t.Fatalf("Bad state")
 	}
 }
@@ -1963,7 +1960,7 @@ func TestMemberList_DeadNode_Refute(t *testing.T) {
 	d := dead{Node: m.config.Name, Incarnation: 1}
 	m.deadNode(&d)
 
-	state := m.nodeMap[m.config.Name]
+	state := m.getNodeMap(m.config.Name)
 	if state.State != StateAlive {
 		t.Fatalf("should still be alive")
 	}
@@ -2033,22 +2030,22 @@ func TestMemberList_MergeState(t *testing.T) {
 	m.mergeState(remote)
 
 	// Check the states
-	state := m.nodeMap["test1"]
+	state := m.getNodeMap("test1")
 	if state.State != StateAlive || state.Incarnation != 2 {
 		t.Fatalf("Bad state %v", state)
 	}
 
-	state = m.nodeMap["test2"]
+	state = m.getNodeMap("test2")
 	if state.State != StateSuspect || state.Incarnation != 1 {
 		t.Fatalf("Bad state %v", state)
 	}
 
-	state = m.nodeMap["test3"]
+	state = m.getNodeMap("test3")
 	if state.State != StateSuspect {
 		t.Fatalf("Bad state %v", state)
 	}
 
-	state = m.nodeMap["test4"]
+	state = m.getNodeMap("test4")
 	if state.State != StateAlive || state.Incarnation != 2 {
 		t.Fatalf("Bad state %v", state)
 	}
@@ -2175,8 +2172,8 @@ func TestMemberlist_GossipToDead(t *testing.T) {
 	m1.aliveNode(&a2, nil, false)
 
 	// Shouldn't send anything to m2 here, node has been dead for 2x the GossipToTheDeadTime
-	m1.nodeMap[addr2.String()].State = StateDead
-	m1.nodeMap[addr2.String()].StateChange = time.Now().Add(-200 * time.Millisecond)
+	m1.getNodeMap(addr2.String()).State = StateDead
+	m1.getNodeMap(addr2.String()).StateChange = time.Now().Add(-200 * time.Millisecond)
 	m1.gossip()
 
 	select {
@@ -2186,7 +2183,7 @@ func TestMemberlist_GossipToDead(t *testing.T) {
 	}
 
 	// Should gossip to m2 because its state has changed within GossipToTheDeadTime
-	m1.nodeMap[addr2.String()].StateChange = time.Now().Add(-20 * time.Millisecond)
+	m1.getNodeMap(addr2.String()).StateChange = time.Now().Add(-20 * time.Millisecond)
 
 	retry(t, 5, 10*time.Millisecond, func(failf func(string, ...interface{})) {
 		m1.gossip()

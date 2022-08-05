@@ -21,7 +21,7 @@ import (
 )
 
 var bindLock sync.Mutex
-var bindNum byte = 10
+var bindNum  byte = 10
 
 func getBindAddrNet(network byte) net.IP {
 	bindLock.Lock()
@@ -1071,7 +1071,7 @@ func TestMemberlist_Leave(t *testing.T) {
 		t.Fatalf("should have 1 node")
 	}
 
-	if m2.nodeMap[c1.Name].State != StateLeft {
+	if state := m2.getNodeMap(c1.Name); state.State != StateLeft {
 		t.Fatalf("bad state")
 	}
 }

@@ -11,6 +11,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/go-msgpack/codec"
@@ -323,4 +325,84 @@ func ensurePort(s string, port int) string {
 	s = strings.Trim(s, "[]")
 	s = net.JoinHostPort(s, strconv.Itoa(port))
 	return s
+}
+
+type shardedMap struct {
+	sharded []*sync.Map
+	length  int64
+}
+
+func newShardedMap(size int64) *shardedMap {
+	sharded := make([]*sync.Map, size)
+
+	for i := int64(0); i < size; i++ {
+		sharded[i] = &sync.Map{}
+	}
+
+	return &shardedMap{
+		sharded: sharded,
+	}
+}
+
+func (l *shardedMap) Close() {
+	l.sharded = nil
+	atomic.StoreInt64(&l.length, 0)
+}
+
+func (l *shardedMap) Exists(k string) bool {
+	_, found := l.sharded[l.fnv(k)].Load(k)
+
+	return found
+}
+
+func (l *shardedMap) Get(k string) (interface{}, bool) {
+	return l.sharded[l.fnv(k)].Load(k)
+}
+
+func (l *shardedMap) Set(k string, v interface{}) bool {
+	_, found := l.sharded[l.fnv(k)].Load(k)
+	l.sharded[l.fnv(k)].Store(k, v)
+
+	if !found {
+		atomic.AddInt64(&l.length, 1)
+	}
+
+	return found
+}
+
+func (l *shardedMap) Remove(k string) {
+	if !l.Exists(k) {
+		return
+	}
+
+	l.sharded[l.fnv(k)].Delete(k)
+
+	atomic.AddInt64(&l.length, -1)
+}
+
+func (l *shardedMap) Traverse(f func(interface{}, interface{}) bool) {
+	for i := range l.sharded {
+		l.sharded[i].Range(f)
+	}
+}
+
+func (l *shardedMap) Len() int {
+	return int(atomic.LoadInt64(&l.length))
+}
+
+const (
+	shardedprime = uint32(16777619)
+	shardedseed  = uint32(2166136261)
+)
+
+func (l *shardedMap) fnv(k string) int64 {
+	h := shardedseed
+
+	kl := len(k)
+	for i := 0; i < kl; i++ {
+		h *= shardedprime
+		h ^= uint32(k[i])
+	}
+
+	return int64(h) % int64(len(l.sharded))
 }

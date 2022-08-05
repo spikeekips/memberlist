@@ -61,9 +61,9 @@ type Memberlist struct {
 	msgQueueLock         sync.Mutex
 
 	nodeLock   sync.RWMutex
-	nodes      []*nodeState          // Known nodes
-	nodeMap    map[string]*nodeState // Maps Node.Name -> NodeState
-	nodeTimers map[string]*suspicion // Maps Node.Name -> suspicion timer
+	nodes      []*nodeState // Known nodes
+	nodeMap    *shardedMap  // Maps Node.Name -> NodeState
+	nodeTimers *shardedMap  // Maps Node.Name -> suspicion timer
 	awareness  *awareness
 
 	tickerLock sync.Mutex
@@ -71,8 +71,7 @@ type Memberlist struct {
 	stopTick   chan struct{}
 	probeIndex int
 
-	ackLock     sync.Mutex
-	ackHandlers map[uint32]*ackHandler
+	ackHandlers *shardedMap
 
 	broadcasts *TransmitLimitedQueue
 
@@ -206,10 +205,10 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		handoffCh:            make(chan struct{}, 1),
 		highPriorityMsgQueue: list.New(),
 		lowPriorityMsgQueue:  list.New(),
-		nodeMap:              make(map[string]*nodeState),
-		nodeTimers:           make(map[string]*suspicion),
+		nodeMap:              newShardedMap(1 << 10),
+		nodeTimers:           newShardedMap(1 << 10),
 		awareness:            newAwareness(conf.AwarenessMaxMultiplier),
-		ackHandlers:          make(map[uint32]*ackHandler),
+		ackHandlers:          newShardedMap(1 << 10),
 		broadcasts:           &TransmitLimitedQueue{RetransmitMult: conf.RetransmitMult},
 		logger:               logger,
 	}
@@ -486,11 +485,26 @@ func (m *Memberlist) refreshAdvertise() (net.IP, int, error) {
 	return addr, port, nil
 }
 
+func (m *Memberlist) getNodeMap(s string) *nodeState {
+	i, found := m.nodeMap.Get(s)
+	if !found {
+		return nil
+	}
+
+	return i.(*nodeState)
+}
+
+func (m *Memberlist) setNodeMap(s string, n *nodeState) {
+	_ = m.nodeMap.Set(s, n)
+}
+
+func (m *Memberlist) removeNodeMap(s string) {
+	m.nodeMap.Remove(s)
+}
+
 // LocalNode is used to return the local Node
 func (m *Memberlist) LocalNode() *Node {
-	m.nodeLock.RLock()
-	defer m.nodeLock.RUnlock()
-	state := m.nodeMap[m.config.Name]
+	state := m.getNodeMap(m.config.Name)
 	return &state.Node
 }
 
@@ -510,9 +524,7 @@ func (m *Memberlist) UpdateNode(timeout time.Duration) error {
 	}
 
 	// Get the existing node
-	m.nodeLock.RLock()
-	state := m.nodeMap[m.config.Name]
-	m.nodeLock.RUnlock()
+	state := m.getNodeMap(m.config.Name)
 
 	// Format a new alive message
 	a := alive{
@@ -646,10 +658,8 @@ func (m *Memberlist) Leave(timeout time.Duration) error {
 	if !m.hasLeft() {
 		atomic.StoreInt32(&m.leave, 1)
 
-		m.nodeLock.Lock()
-		state, ok := m.nodeMap[m.config.Name]
-		m.nodeLock.Unlock()
-		if !ok {
+		state := m.getNodeMap(m.config.Name)
+		if state == nil {
 			m.logger.Printf("[WARN] memberlist: Leave but we're not in the node map.")
 			return nil
 		}
@@ -748,25 +758,24 @@ func (m *Memberlist) hasLeft() bool {
 }
 
 func (m *Memberlist) getNodeState(addr string) NodeStateType {
-	m.nodeLock.RLock()
-	defer m.nodeLock.RUnlock()
+	n := m.getNodeMap(addr)
+	if n == nil {
+		return StateDead
+	}
 
-	n := m.nodeMap[addr]
 	return n.State
 }
 
 func (m *Memberlist) getNodeStateChange(addr string) time.Time {
-	m.nodeLock.RLock()
-	defer m.nodeLock.RUnlock()
+	n := m.getNodeMap(addr)
+	if n == nil {
+		return time.Time{}
+	}
 
-	n := m.nodeMap[addr]
 	return n.StateChange
 }
 
 func (m *Memberlist) changeNode(addr string, f func(*nodeState)) {
-	m.nodeLock.Lock()
-	defer m.nodeLock.Unlock()
-
-	n := m.nodeMap[addr]
+	n := m.getNodeMap(addr)
 	f(n)
 }
