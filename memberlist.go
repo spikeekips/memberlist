@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/armon/go-metrics"
 	multierror "github.com/hashicorp/go-multierror"
 	sockaddr "github.com/hashicorp/go-sockaddr"
 	"github.com/miekg/dns"
@@ -76,6 +77,9 @@ type Memberlist struct {
 	broadcasts *TransmitLimitedQueue
 
 	logger *log.Logger
+
+	// metricLabels is the slice of labels to put on all emitted metrics
+	metricLabels []metrics.Label
 }
 
 // BuildVsnArray creates the array of Vsn
@@ -134,9 +138,10 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 	transport := conf.Transport
 	if transport == nil {
 		nc := &NetTransportConfig{
-			BindAddrs: []string{conf.BindAddr},
-			BindPort:  conf.BindPort,
-			Logger:    logger,
+			BindAddrs:    []string{conf.BindAddr},
+			BindPort:     conf.BindPort,
+			Logger:       logger,
+			MetricLabels: conf.MetricLabels,
 		}
 
 		// See comment below for details about the retry in here.
@@ -207,10 +212,11 @@ func newMemberlist(conf *Config) (*Memberlist, error) {
 		lowPriorityMsgQueue:  list.New(),
 		nodeMap:              newShardedMap(1 << 10),
 		nodeTimers:           newShardedMap(1 << 10),
-		awareness:            newAwareness(conf.AwarenessMaxMultiplier),
+		awareness:            newAwareness(conf.AwarenessMaxMultiplier, conf.MetricLabels),
 		ackHandlers:          newShardedMap(1 << 10),
 		broadcasts:           &TransmitLimitedQueue{RetransmitMult: conf.RetransmitMult},
 		logger:               logger,
+		metricLabels:         conf.MetricLabels,
 	}
 	m.broadcasts.NumNodes = func() int {
 		return m.estNumNodes()
@@ -385,7 +391,7 @@ func (m *Memberlist) resolveAddr(hostStr string) ([]ipPort, error) {
 	// IPv6 addresses.
 	if ip := net.ParseIP(host); ip != nil {
 		return []ipPort{
-			ipPort{ip: ip, port: port, nodeName: nodeName},
+			{ip: ip, port: port, nodeName: nodeName},
 		}, nil
 	}
 
@@ -431,7 +437,7 @@ func (m *Memberlist) setAlive() error {
 		return fmt.Errorf("Failed to parse interface addresses: %v", err)
 	}
 	ifAddrs := []sockaddr.IfAddr{
-		sockaddr.IfAddr{
+		{
 			SockAddr: ipAddr,
 		},
 	}
