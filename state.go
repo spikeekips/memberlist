@@ -852,8 +852,7 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 	// Add the handlers
 	ah := &ackHandler{ackFn, nackFn, nil}
 	m.ackLock.Lock()
-	m.ackHandlers[seqNo] = ah
-	m.ackLock.Unlock()
+	defer m.ackLock.Unlock()
 
 	// Setup a reaping routing
 	ah.timer = time.AfterFunc(timeout, func() {
@@ -865,6 +864,8 @@ func (m *Memberlist) setProbeChannels(seqNo uint32, ackCh chan ackMessage, nackC
 		default:
 		}
 	})
+
+	m.ackHandlers[seqNo] = ah
 }
 
 // setAckHandler is used to attach a handler to be invoked when an ack with a
@@ -875,8 +876,7 @@ func (m *Memberlist) setAckHandler(seqNo uint32, ackFn func([]byte, time.Time), 
 	// Add the handler
 	ah := &ackHandler{ackFn, nil, nil}
 	m.ackLock.Lock()
-	m.ackHandlers[seqNo] = ah
-	m.ackLock.Unlock()
+	defer m.ackLock.Unlock()
 
 	// Setup a reaping routing
 	ah.timer = time.AfterFunc(timeout, func() {
@@ -884,6 +884,8 @@ func (m *Memberlist) setAckHandler(seqNo uint32, ackFn func([]byte, time.Time), 
 		delete(m.ackHandlers, seqNo)
 		m.ackLock.Unlock()
 	})
+
+	m.ackHandlers[seqNo] = ah
 }
 
 // Invokes an ack handler if any is associated, and reaps the handler immediately
@@ -1150,7 +1152,6 @@ func (m *Memberlist) aliveNode(a *alive, notify chan struct{}, bootstrap bool) {
 		if oldState == StateDead || oldState == StateLeft {
 			// if Dead/Left -> Alive, notify of join
 			m.config.Events.NotifyJoin(&state.Node)
-
 		} else if !bytes.Equal(oldMeta, state.Meta) {
 			// if Meta changed, trigger an update notification
 			m.config.Events.NotifyUpdate(&state.Node)
